@@ -437,7 +437,7 @@ fi
 if [ "$HAVE_BUILD" = "1" ]; then
     rm -rf "$T/pkgbuild" && mkdir -p "$T/pkgbuild" && cp "$PIG_DIR"/pig.py "$PIG_DIR"/pyproject.toml "$PIG_DIR"/README.md "$PIG_DIR"/LICENSE "$T/pkgbuild/" 2>/dev/null
     (cd "$T/pkgbuild" && python3 -m build --sdist --wheel --outdir dist >/dev/null 2>&1)
-    if ls "$T/pkgbuild/dist/"pig_linux-1.1.0* >/dev/null 2>&1; then
+    if ls "$T/pkgbuild/dist/"pigctl-1.1.0* >/dev/null 2>&1; then
         pass "pyproject-build"
     else
         fail "pyproject-build" "no dist files: $(ls "$T/pkgbuild/dist" 2>/dev/null)"

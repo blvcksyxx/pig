@@ -6,7 +6,7 @@
   see `DISTROS.md`)
 - installer refuses unknown distributions unless forced
   (`sh install.sh --force`, at your own responsibility)
-- PyPI packaging (`pyproject.toml`, project `pig-linux`, command `pig`)
+- PyPI packaging (`pyproject.toml`, project `pigctl`, command `pig`)
 - self-update points at the published `pig.py`; a 404 now says
   the file is not published instead of a bare download error
 - `install.sh` works with the `pig.py` filename
