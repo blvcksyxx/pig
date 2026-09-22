@@ -28,10 +28,10 @@ cd pig
 sh install.sh
 ```
 
-From PyPI (package `pig-pm`, command stays `pig`):
+From PyPI (package `pigpm`, command stays `pig`):
 
 ```sh
-pip install pig-pm
+pip install pigpm
 ```
 
 The installer copies `pig` to `~/.local/bin/pig`, creates the needed directories,
