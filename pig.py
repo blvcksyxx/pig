@@ -34,7 +34,7 @@ from pathlib import Path
 
 VERSION = "1.0.0"
 OFFICIAL_DICT_URL = "https://github.com/blvcksyxx/pig/raw/refs/heads/main/pig.txt"
-OFFICIAL_PIG_URL = "https://github.com/blvcksyxx/pig/raw/refs/heads/main/pig"
+OFFICIAL_PIG_URL = "https://github.com/blvcksyxx/pig/raw/refs/heads/main/pig.py"
 TIMEOUT = 20
 
 
@@ -1259,6 +1259,8 @@ def _self_update():
     try:
         new = fetch_text(OFFICIAL_PIG_URL)
     except PigError as e:
+        if "404" in str(e):
+            raise PigError(f"pig self-update failed: file not published (404) at {OFFICIAL_PIG_URL}")
         raise PigError(f"pig self-update failed: {e}")
     _install_new_executable(Path(__file__).resolve(), new)
 
