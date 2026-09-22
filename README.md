@@ -14,10 +14,13 @@ not manage system packages.
 - multiple dictionaries, aliases, per-source conflict choice
 - url-based upgrade, self-update, temp cache cleanup
 - user-local install, no sudo by default
+- distro check (`pig doctor`, see `DISTROS.md`)
 
 ## installation
 
 Requirements: `python3`.
+
+From git:
 
 ```sh
 git clone https://github.com/blvcksyxx/pig
@@ -25,9 +28,17 @@ cd pig
 sh install.sh
 ```
 
-This copies `pig` to `~/.local/bin/pig`, creates the needed directories,
+From PyPI (package `pig-pm`, command stays `pig`):
+
+```sh
+pip install pig-pm
+```
+
+The installer copies `pig` to `~/.local/bin/pig`, creates the needed directories,
 initializes the config and adds `~/.local/bin` to PATH in `.bashrc` /
 `.zshrc` (once, only if missing). No sudo, no system files.
+The installer refuses unknown distributions unless forced
+(`sh install.sh --force`, at your own responsibility).
 
 ## quick start
 
@@ -58,6 +69,7 @@ pig update                refresh dictionary cache, self-update pig
 pig upgrade [-y]          reinstall packages whose url changed
 pig clean                 delete temp files from the cache
 pig config                show config file and sources
+pig doctor                check distro support and environment
 ```
 
 `-y` / `--yes` skips interactive confirmations. With several sources
