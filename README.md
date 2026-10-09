@@ -14,6 +14,8 @@ not manage system packages.
 - multiple dictionaries, aliases, per-source conflict choice
 - url-based upgrade, self-update, temp cache cleanup
 - user-local install, no sudo by default
+- per-distro dictionary: `pig-arch.txt` is selected automatically on
+  distributions without `dpkg` (Arch, Fedora, NixOS, ...)
 - distro check (`pig doctor`, see `DISTROS.md`)
 
 ## installation
@@ -134,6 +136,45 @@ Created automatically on first run. Local paths and `file://` urls
 work as sources. Read with `tomllib` when the python version has it,
 otherwise with a minimal built-in parser; written with stdlib only.
 
+## distributions without dpkg
+
+`.deb` needs `dpkg`, which Arch, Fedora, NixOS and friends do not ship.
+The stock `pig.txt` is therefore mostly unusable there, so pig keeps a
+second dictionary, `pig-arch.txt`, holding only `.tar.gz`, `.tar.xz` and
+`.sh` entries.
+
+The choice is automatic: on any distribution `pig doctor` reports as
+`partial`, a source named `official` that points at the stock
+`pig.txt` url is redirected to `pig-arch.txt` and reported as
+`official-arch`:
+
+```text
+[pig] config: /home/user/.config/pig/config.toml
+  official-arch = https://github.com/blvcksyxx/pig/raw/refs/heads/main/pig-arch.txt
+```
+
+A fresh config on such a distribution is written with `pig-arch.txt`
+from the start. Only that one source is touched — a dictionary you
+added under a name of your own is never rewritten. To keep the `.deb`
+dictionary on a distribution without `dpkg`, name the source
+yourself:
+
+```toml
+[sources]
+debs = "https://github.com/blvcksyxx/pig/raw/refs/heads/main/pig.txt"
+```
+
+`pig doctor` then notes `dictionary: pig.txt (expected pig-arch.txt
+for this distro)` so the mismatch stays visible.
+
+`pig-arch.txt` is intentionally shorter. Apps whose vendor ships only
+`.deb`, `.rpm`, `.AppImage` or `.pkg.tar.zst` are left out rather than
+listed and failing: Chrome, Slack, Obsidian, Cursor, Vesktop, GitHub
+Desktop, Steam, Zoom, Unity Hub, Etcher, 1Password, rpi-imager,
+docker-desktop, Happ and RustDesk. Tor Browser is left out too — its
+archive carries no single application binary, and pig refuses to guess
+instead of pointing the launcher at the wrong file.
+
 ## dictionaries
 
 Format, one entry per line:
@@ -144,6 +185,36 @@ name::url
 
 Empty lines, `#` comments and lines without `::` are ignored.
 Duplicates keep the first entry.
+
+Two dictionaries ship with pig:
+
+| file | used on | contains |
+| --- | --- | --- |
+| `pig.txt` | distributions with `dpkg` | everything, `.deb` included |
+| `pig-arch.txt` | distributions without `dpkg` | archives and shell installers only |
+
+Both are plain text in the repository root and can be used as an extra
+`[sources]` entry on any distribution.
+
+## checking entries
+
+`check_links.py` resolves every url in a dictionary and reports the
+status, the redirect target and the file type pig would detect:
+
+```sh
+python3 check_links.py pig.txt
+```
+
+`check_installs.py` goes further and runs a real `pig install` of every
+entry in a throwaway `HOME`, which is what actually proves an entry
+works end to end:
+
+```sh
+python3 check_installs.py pig-arch.txt
+```
+
+Shell installers (`.sh`) are downloaded and checked for a shebang but
+not executed: they write to `/opt` and call `apt`/`dnf`.
 
 ## aliases
 
@@ -271,6 +342,10 @@ Hermetic regression + functional suite: isolated HOME dirs, local
 files and a local 127.0.0.1 server only. No network, no system changes
 (except an empty test `.deb` when passwordless sudo allows it).
 
+`check_links.py` and `check_installs.py` are the other half: they hit
+the network to verify that every dictionary entry still resolves and
+still installs. See "checking entries".
+
 ## license
 
 PolyForm Noncommercial 1.0.0 (see `LICENSE`).
@@ -290,4 +365,4 @@ Copyright (c) 2026 @blvcksyxx
 
 ## changelog
 
-See `CHANGELOG.md`. Current release: `v1.0.0`.
+See `CHANGELOG.md`. Current release: `v1.2.0`.

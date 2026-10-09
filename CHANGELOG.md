@@ -1,5 +1,31 @@
 # changelog
 
+## v1.2.0
+
+- new `pig-arch.txt` dictionary for distributions without `dpkg`
+  (Arch, Fedora, NixOS, ...): archives and shell installers only
+- pig picks it automatically: a stock `official` source is redirected
+  to `pig-arch.txt` on any distribution `pig doctor` reports as
+  `partial`; a dictionary configured by the user is never rewritten
+- fresh configs on those distributions are written with `pig-arch.txt`
+- `pig doctor` prints the dictionary in use; `pig config` explains why
+- executable pick: paths under a `debug/` directory are no longer
+  candidates (fixes the Tor expert bundle), and the fallback now takes
+  the shallowest remaining candidate instead of refusing whenever more
+  than one exists (fixes VSCodium)
+- `check_installs.py`: installs every dictionary entry in a throwaway
+  `HOME` to verify it end to end
+- dictionary fixes: `vesktop` (wrong asset name), `cursor` (new url
+  format), `anydesk` (unversioned url is gone), `opencode` (missing
+  `-deb` suffix), `ayugram` (the entry pointed at a GitHub *source*
+  tarball with no binary; AyuGram ships no linux build at all, removed)
+- dictionary refresh: tor 15.0.21 -> 15.0.24, burpsuite 2026.7.3 ->
+  2026.9.2, obsidian 1.13.7 -> 1.14.4, dbeaver 26.2.1 -> 26.2.2,
+  insomnia 13.2.0 -> 13.3.1, github-desktop 3.4.9 -> 3.4.13,
+  slack 4.52.155 -> 4.52.178, rpi-imager 2.0.11.1 -> 2.0.12
+- vscode and cursor now track the vendor's latest build instead of a
+  pinned version
+
 ## v1.1.0
 
 - distro support tiers and `pig doctor` (full / partial / unknown,

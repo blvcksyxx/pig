@@ -49,6 +49,18 @@ which these distributions do not ship.
 - NixOS
 - Slackware
 
+On these distributions pig switches to the `pig-arch.txt` dictionary,
+which lists only archives and shell installers, so `pig install` has
+something to work with. `pig doctor` shows the dictionary in use:
+
+```text
+support: partial (archives, shell; no dpkg)
+dictionary: pig-arch.txt
+```
+
+A config that names its own dictionary keeps it; see the README
+section "distributions without dpkg".
+
 ## unknown distributions
 
 Anything else reports `support: unknown` from `pig doctor`.

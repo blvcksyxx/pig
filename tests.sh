@@ -385,6 +385,62 @@ expect_code 1 "$code" "doctor-unknown-exit"
 expect_grep "support: unknown" "doctor-unknown-msg"
 expect_no_traceback "doctor-no-traceback"
 
+echo "--- per-distro dictionary ---"
+PIG_TXT_URL="https://github.com/blvcksyxx/pig/raw/refs/heads/main/pig.txt"
+PIG_ARCH_URL="https://github.com/blvcksyxx/pig/raw/refs/heads/main/pig-arch.txt"
+printf 'ID=debian\nNAME="Debian GNU/Linux"\nPRETTY_NAME="Debian GNU/Linux 12"\n' >"$T/os-debian"
+
+dict_check() { # dict_check <name> <os> <home> <config-body> <expect-url-substr>
+    _n="$1"; _os="$2"; _h="$3"; _cfg="$4"; _want="$5"
+    rm -rf "$_h"; mkdir -p "$_h/.config/pig"
+    printf '%s' "$_cfg" >"$_h/.config/pig/config.toml"
+    PIG_OS_RELEASE="$_os" run "$_h" doctor >/dev/null
+    # run() prints the exit code and leaves pig's output in $T/last.out
+    if grep -q "dictionary: .*$_want" "$T/last.out"; then
+        pass "$_n"
+    else
+        fail "$_n" "$(grep dictionary "$T/last.out")"
+    fi
+}
+
+# fresh config on a distro without dpkg points at pig-arch.txt
+HD="$T/hdict-arch"; rm -rf "$HD"; mkdir -p "$HD"
+if PIG_OS_RELEASE="$T/os-arch" run "$HD" config >/dev/null &&
+   grep -q "$PIG_ARCH_URL" "$HD/.config/pig/config.toml"; then
+    pass "dict-arch-fresh"
+else
+    fail "dict-arch-fresh" "$(cat "$HD/.config/pig/config.toml" 2>/dev/null)"
+fi
+# fresh config on a distro with dpkg still points at pig.txt
+HD="$T/hdict-deb"; rm -rf "$HD"; mkdir -p "$HD"
+if PIG_OS_RELEASE="$T/os-debian" run "$HD" config >/dev/null &&
+   grep -q "$PIG_TXT_URL" "$HD/.config/pig/config.toml" &&
+   ! grep -q "pig-arch" "$HD/.config/pig/config.toml"; then
+    pass "dict-debian-fresh"
+else
+    fail "dict-debian-fresh" "$(cat "$HD/.config/pig/config.toml" 2>/dev/null)"
+fi
+# a config written by an older pig (official = pig.txt) is redirected
+dict_check "dict-arch-redirect" "$T/os-arch" "$T/hdict-old" \
+    "[sources]
+official = \"$PIG_TXT_URL\"
+" "pig-arch.txt"
+# a source the user named themselves is never rewritten
+dict_check "dict-arch-user-source" "$T/os-arch" "$T/hdict-user" \
+    "[sources]
+debs = \"$PIG_TXT_URL\"
+" "pig.txt"
+# a custom local dictionary is never rewritten
+dict_check "dict-arch-local-source" "$T/os-arch" "$T/hdict-local" \
+    "[sources]
+mine = \"/tmp/mine.txt\"
+" "mine.txt"
+# the same user-named source is untouched on a full distro too
+dict_check "dict-debian-user-source" "$T/os-debian" "$T/hdict-deb2" \
+    "[sources]
+debs = \"$PIG_TXT_URL\"
+" "pig.txt"
+
 echo "--- installer gate ---"
 HI="$T/hinstall"
 mkdir -p "$HI"
@@ -437,7 +493,8 @@ fi
 if [ "$HAVE_BUILD" = "1" ]; then
     rm -rf "$T/pkgbuild" && mkdir -p "$T/pkgbuild" && cp "$PIG_DIR"/pig.py "$PIG_DIR"/pyproject.toml "$PIG_DIR"/README.md "$PIG_DIR"/LICENSE "$T/pkgbuild/" 2>/dev/null
     (cd "$T/pkgbuild" && python3 -m build --sdist --wheel --outdir dist >/dev/null 2>&1)
-    if ls "$T/pkgbuild/dist/"pigctl-1.1.0* >/dev/null 2>&1; then
+    PIG_VER=$(sed -n 's/^VERSION = "\(.*\)"$/\1/p' "$PIG_DIR/pig.py" | head -1)
+    if ls "$T/pkgbuild/dist/"pigctl-"$PIG_VER"* >/dev/null 2>&1; then
         pass "pyproject-build"
     else
         fail "pyproject-build" "no dist files: $(ls "$T/pkgbuild/dist" 2>/dev/null)"

@@ -33,8 +33,9 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 OFFICIAL_DICT_URL = "https://github.com/blvcksyxx/pig/raw/refs/heads/main/pig.txt"
+OFFICIAL_ARCH_DICT_URL = "https://github.com/blvcksyxx/pig/raw/refs/heads/main/pig-arch.txt"
 OFFICIAL_PIG_URL = "https://github.com/blvcksyxx/pig/raw/refs/heads/main/pig.py"
 TIMEOUT = 20
 
@@ -200,6 +201,17 @@ def cmd_doctor():
     print("tools: " + ", ".join(tools))
     cp = config_path()
     print(f"config: {cp} ({'present' if cp.exists() else 'missing'})")
+    if cp.exists():
+        try:
+            active = ", ".join(s["url"].rsplit("/", 1)[-1] for s in load_sources())
+        except PigError as e:
+            active = f"unreadable ({e})"
+        which = "pig-arch.txt" if uses_arch_dict() else "pig.txt"
+        note = "" if active == which else f"  (expected {which} for this distro)"
+        print(f"dictionary: {active or 'none'}{note}")
+    else:
+        print(f"dictionary: {default_dict_url().rsplit('/', 1)[-1]} "
+              "(default; config not created yet)")
     bd = bin_dir()
     in_path = str(bd) in os.environ.get("PATH", "").split(os.pathsep)
     print(f"bin: {bd} ({'in PATH' if in_path else 'NOT in PATH'})")
@@ -208,7 +220,43 @@ def cmd_doctor():
 
 # ---------- config ----------
 
-DEFAULT_CONFIG = '[sources]\nofficial = "%s"\n' % OFFICIAL_DICT_URL
+# Distro tier drives the default dictionary: on a distro without dpkg the
+# stock .deb dictionary is mostly uninstallable, so pig points at the arch
+# dictionary instead (archives and shell installers only). A config that
+# already names a different url is never rewritten.
+
+def uses_arch_dict() -> bool:
+    """True when the official .deb dictionary cannot work on this distro."""
+    return distro_tier(detect_distro()) == "partial"
+
+
+def default_dict_url() -> str:
+    return OFFICIAL_ARCH_DICT_URL if uses_arch_dict() else OFFICIAL_DICT_URL
+
+
+def default_source_name() -> str:
+    return "official-arch" if uses_arch_dict() else "official"
+
+
+def _adapt_sources(sources):
+    """Redirect the stock official source to the dictionary this distro needs.
+
+    Only the exact source pig writes itself - named `official`, pointing at
+    the stock url - is touched. A dictionary the user added under their own
+    name keeps its url on every distribution, including on Arch.
+    """
+    if not uses_arch_dict():
+        return sources
+    out = []
+    for s in sources:
+        if (s["name"] == "official"
+                and s["url"].strip().rstrip("/") == OFFICIAL_DICT_URL.rstrip("/")):
+            s = {"name": default_source_name(), "url": OFFICIAL_ARCH_DICT_URL}
+        out.append(s)
+    return out
+
+
+DEFAULT_CONFIG = '[sources]\n%s = "%s"\n'
 
 
 def _toml_escape(s: str) -> str:
@@ -219,7 +267,8 @@ def ensure_config() -> Path:
     ensure_dirs()
     cp = config_path()
     if not cp.exists():
-        cp.write_text(DEFAULT_CONFIG, encoding="utf-8")
+        cp.write_text(DEFAULT_CONFIG % (default_source_name(),
+                                        default_dict_url()), encoding="utf-8")
         _fix_owner(cp)
         info(f"created default config at {cp}")
     return cp
@@ -339,7 +388,7 @@ def load_sources():
     # dedupe by name, keep first
     seen = set()
     uniq = []
-    for s in sources:
+    for s in _adapt_sources(sources):
         if s["name"] in seen:
             continue
         seen.add(s["name"])
@@ -834,6 +883,13 @@ _EXE_BAD_SUFFIXES = (".so", ".pak", ".dat", ".bin", ".o", ".a", ".png",
                      ".log", ".py", ".pyc", ".sh")
 # name fragments that mark helpers, not the application itself
 _EXE_BAD_NAME_PARTS = ("helper", "crash", "sandbox", "uninstall", "updater")
+# directories that only ever hold debug/unstripped build output
+_EXE_BAD_DIRS = frozenset({"debug", "dbg"})
+
+
+def _in_bad_dir(rel: str) -> bool:
+    return any(part in _EXE_BAD_DIRS
+               for part in Path(rel).parent.as_posix().lower().split("/"))
 
 
 def _exe_candidates(root: Path):
@@ -841,7 +897,8 @@ def _exe_candidates(root: Path):
 
     In-tree symlinks to executable files are candidates too (rel is the
     link, target rel is where it points); dangling or escaping links
-    are skipped.
+    are skipped. Paths under a debug/ directory are never candidates:
+    an application binary does not live there.
     """
     root_real = os.path.realpath(root)
     out = []
@@ -850,6 +907,8 @@ def _exe_candidates(root: Path):
             p = Path(dirpath) / fn
             try:
                 rel = p.relative_to(root).as_posix()
+                if _in_bad_dir(rel):
+                    continue
                 if p.is_symlink():
                     rp = p.resolve()
                     if not _within(root_real, str(rp)) or not rp.is_file():
@@ -912,10 +971,12 @@ def select_executable(root: Path, name: str) -> str:
     if ci:
         return _pick_shallowest(ci, name)
     rest = [(r, d) for r, d, _ in cands if _fallback_allowed(r) and d <= 2]
-    if len(rest) == 1:
-        return rest[0][0]
+    if rest:
+        # same rule as the exact/case-insensitive matches: shallowest wins,
+        # and only a tie at that depth is refused as ambiguous
+        return _pick_shallowest(rest, name)
     show = ", ".join(sorted(r for r, _, _ in cands)[:5]) or "none found"
-    raise PigError(f"cannot determine executable for '{name}': {len(rest)} candidates ({show})")
+    raise PigError(f"cannot determine executable for '{name}': no unique candidate ({show})")
 
 
 def _move_tree(src: Path, dst: Path):
@@ -1440,6 +1501,9 @@ def cmd_config():
     print(f"config: {cp}")
     for s in load_sources():
         print(f"  {s['name']} = {s['url']}")
+    if uses_arch_dict():
+        info("distro has no dpkg: the official dictionary is pig-arch.txt "
+             "(archives and shell installers only)")
     print("edit this file to add your own dictionaries (local paths allowed)")
     return 0
 

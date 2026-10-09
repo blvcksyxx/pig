@@ -1,0 +1,33 @@
+# arch dictionary
+# only formats pig installs without dpkg and without root:
+# .tar.gz, .tar.xz and .sh. Apps whose vendor ships only .deb/.rpm/
+# .AppImage/.pkg.tar.zst are intentionally absent (see README, Arch section).
+
+# --- archives ---
+telegram::https://td.telegram.org/tlinux/tsetup.7.2.5.tar.xz
+telegram-desktop::https://td.telegram.org/tlinux/tsetup.7.2.5.tar.xz
+tor::https://archive.torproject.org/tor-package-archive/torbrowser/15.0.24/tor-expert-bundle-linux-x86_64-15.0.24.tar.gz
+tor-project::https://archive.torproject.org/tor-package-archive/torbrowser/15.0.24/tor-expert-bundle-linux-x86_64-15.0.24.tar.gz
+vscode::https://update.code.visualstudio.com/latest/linux-x64/stable
+code::https://update.code.visualstudio.com/latest/linux-x64/stable
+vscodium::https://github.com/VSCodium/vscodium/releases/download/1.135.06055/VSCodium-linux-x64-1.135.06055.tar.gz
+# opencode ships a desktop app only as .deb/.rpm/.AppImage, none of which
+# pig can install here; the tarball is the terminal build, so it is listed
+# under its own name instead of shadowing the desktop 'opencode' entry.
+opencode-cli::https://github.com/anomalyco/opencode/releases/latest/download/opencode-linux-x64.tar.gz
+discord::https://discord.com/api/download?platform=linux&format=tar.gz
+postman::https://dl.pstmn.io/download/latest/linux64
+zed::https://cloud.zed.dev/releases/stable/latest/download?asset=zed&arch=x86_64&os=linux&source=pig
+dbeaver::https://github.com/dbeaver/dbeaver/releases/download/26.2.2/dbeaver-ce-26.2.2-linux-x86_64.tar.gz
+insomnia::https://github.com/Kong/insomnia/releases/download/core%4013.3.1/Insomnia.Core-13.3.1.tar.gz
+localsend::https://github.com/localsend/localsend/releases/download/v1.18.2/LocalSend-1.18.2-linux-x86-64.tar.gz
+anydesk::https://download.anydesk.com/linux/anydesk-8.1.0-amd64.tar.gz
+ffmpeg::https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n9.0-latest-linux64-gpl-9.0.tar.xz
+arduinoapplab::https://downloads.arduino.cc/AppLab/Stable/ArduinoAppLab_0.10.0_Linux_x86-64.tar.gz
+arduinolab::https://downloads.arduino.cc/AppLab/Stable/ArduinoAppLab_0.10.0_Linux_x86-64.tar.gz
+
+# --- shell installers ---
+zsh::https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh
+ohmyzsh::https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh
+brave::https://dl.brave.com/install.sh
+burpsuite::https://portswigger.net/burp/releases/download?product=desktop&version=2026.9.2&type=Linux
