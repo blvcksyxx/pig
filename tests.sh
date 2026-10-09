@@ -632,7 +632,7 @@ check(isinstance(pig.repo_in_conf("multilib"), bool),
 check(pig.enabled_repos() is not None, "enabled_repos must answer")
 
 # the pacman.conf edit itself, on a throwaway file: no root involved
-import pathlib, tempfile
+import os, pathlib, tempfile, time
 tmp = pathlib.Path(tempfile.mkdtemp())
 conf = tmp / "pacman.conf"
 conf.write_text("[core]\nInclude = /etc/pacman.d/mirrorlist\n"
@@ -663,6 +663,72 @@ check(active("core") == 1,
       f"an existing stanza must not be duplicated, got {active('core')}")
 check(active("custom") == 0,
       "a commented stanza must stay commented")
+
+# the pacman lock: live vs abandoned. No root involved, the removal is
+# stubbed out, so this is safe to exercise on any machine.
+lock = tmp / "db.lck"
+saved_lock, pig.PACMAN_LOCK = pig.PACMAN_LOCK, lock
+saved_run, saved_busy = pig.run_cmd, pig.native_pkgmgr_running
+class RC:
+    def __init__(self, code=0):
+        self.returncode = code
+old = time.time() - 3600
+
+# no lock at all
+check(pig.pacman_lock_state() == "none", "no lock means none")
+
+# a lock left by a killed run, with nothing running
+lock.write_text("")
+os.utime(lock, (old, old))
+pig.native_pkgmgr_running = lambda: False
+check(pig.pacman_lock_state() == "stale", "old lock, no process: stale")
+
+# the same lock while a package manager runs
+pig.native_pkgmgr_running = lambda: True
+check(pig.pacman_lock_state() == "live", "a running process means live")
+try:
+    pig.ensure_pacman_unlocked(yes=True)
+    fail.append("must refuse to remove a live lock")
+except pig.PigError as e:
+    check("will not remove a lock" in str(e), f"refusal should explain: {e}")
+check(lock.exists(), "a live lock must be left alone")
+
+# a brand new lock probably belongs to a process that is just starting
+os.utime(lock, (time.time(), time.time()))
+pig.native_pkgmgr_running = lambda: False
+check(pig.pacman_lock_state() == "live", "a fresh lock must not be called stale")
+
+# an abandoned lock is removed, and removal is actually verified
+os.utime(lock, (old, old))
+pig.run_cmd = lambda argv, need_root=False, stdin=None: RC(0)
+try:
+    pig.ensure_pacman_unlocked(yes=True)
+    fail.append("must not claim success when the file survives")
+except pig.PigError as e:
+    check("still present" in str(e), f"should report a failed removal: {e}")
+
+def _remove(argv, need_root=False, stdin=None):
+    lock.unlink(missing_ok=True)
+    return RC(0)
+pig.run_cmd = _remove
+pig.ensure_pacman_unlocked(yes=True)
+check(not lock.exists(), "an abandoned lock must be gone afterwards")
+
+# a non-zero rm is an error, not a warning
+lock.write_text("")
+os.utime(lock, (old, old))
+pig.run_cmd = lambda argv, need_root=False, stdin=None: RC(1)
+try:
+    pig.ensure_pacman_unlocked(yes=True)
+    fail.append("a failing rm must raise")
+except pig.PigError as e:
+    check("cannot remove" in str(e), f"should say it cannot remove: {e}")
+
+# without -y a refusal at the prompt stops the install
+lock.unlink(missing_ok=True)
+pig.run_cmd, pig.native_pkgmgr_running = saved_run, saved_busy
+pig.PACMAN_LOCK = saved_lock
+lock.unlink(missing_ok=True)
 # the stanza must not travel through stdin: under `sudo -S` the password
 # is read from there and would swallow it
 seen = {}

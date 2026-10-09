@@ -28,12 +28,13 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
 
-VERSION = "1.4.1"
+VERSION = "1.4.2"
 OFFICIAL_DICT_URL = "https://github.com/blvcksyxx/pig/raw/refs/heads/main/pig.txt"
 OFFICIAL_ARCH_DICT_URL = "https://github.com/blvcksyxx/pig/raw/refs/heads/main/pig-arch.txt"
 OFFICIAL_PIG_URL = "https://github.com/blvcksyxx/pig/raw/refs/heads/main/pig.py"
@@ -1557,6 +1558,101 @@ def native_repo_hint(name: str) -> str:
             f"not enabled (enabled: {on})")
 
 
+# ---------- the pacman lock ----------
+#
+# pacman refuses to run while /var/lib/pacman/db.lck exists. A package
+# manager that is killed leaves that file behind, and every later run
+# then stalls on it. pig cannot take priority over a package manager
+# that is genuinely running - that would corrupt its transaction - but
+# it can tell a live lock from an abandoned one.
+
+PACMAN_LOCK = Path("/var/lib/pacman/db.lck")
+# a lock this fresh was probably just taken, so do not call it stale
+NATIVE_LOCK_MIN_AGE = 60
+_PKGMGR_PROCS = frozenset({
+    "pacman", "paru", "yay", "makepkg", "pikaur", "pacutils",
+    "pkgctl", "downgrade", "topgrade",
+})
+
+
+def native_pkgmgr_running() -> bool:
+    """Is a package manager or a build running right now?
+
+    Reads /proc rather than trusting a lock file: a lock can outlive the
+    process that made it, and a process can hold work without a lock.
+    """
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return False
+    for name in entries:
+        if not name.isdigit():
+            continue
+        try:
+            with open(f"/proc/{name}/comm", encoding="utf-8") as fh:
+                comm = fh.read().strip()
+        except OSError:
+            continue  # gone, or not ours to read
+        if comm in _PKGMGR_PROCS:
+            return True
+    return False
+
+
+def pacman_lock_state() -> str:
+    """'none', 'stale' or 'live' for the pacman database lock."""
+    try:
+        st = PACMAN_LOCK.stat()
+    except FileNotFoundError:
+        return "none"
+    except OSError:
+        return "live"  # cannot tell: assume somebody holds it
+    if native_pkgmgr_running():
+        return "live"
+    try:
+        age = time.time() - st.st_mtime
+    except OSError:
+        return "live"
+    # too fresh to be abandoned: a package manager may be starting up
+    return "stale" if age >= NATIVE_LOCK_MIN_AGE else "live"
+
+
+def ensure_pacman_unlocked(yes: bool = False) -> None:
+    """Clear an abandoned pacman lock, refuse to touch a live one."""
+    state = pacman_lock_state()
+    if state == "none":
+        return
+    if state == "live":
+        raise PigError(
+            f"{PACMAN_LOCK} is held and a package manager is running. "
+            f"Wait for it to finish - pig will not remove a lock that "
+            f"belongs to a running process.")
+    info(f"{PACMAN_LOCK} was left behind by an interrupted run and no "
+         f"package manager is running now")
+    prompt = "remove it and continue?"
+    if yes:
+        info(prompt + " (-y)")
+    else:
+        try:
+            raw = input(f"{prompt} [y/N]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            raise PigError("cancelled")
+        if raw != "y":
+            raise PigError(
+                f"cannot continue: {PACMAN_LOCK} blocks every package "
+                f"operation (remove it yourself or rerun with -y)")
+    r = run_cmd(["rm", "-f", str(PACMAN_LOCK)], need_root=True)
+    if r.returncode != 0:
+        raise PigError(f"cannot remove {PACMAN_LOCK}")
+    # check the file is really gone, not merely that nothing holds it:
+    # an rm that failed quietly must not be reported as success
+    if PACMAN_LOCK.exists():
+        raise PigError(
+            f"{PACMAN_LOCK} is still present after removal; "
+            f"remove it by hand and try again")
+    info("lock removed")
+
+
 # ---------- enabling a pacman repository ----------
 
 # Only the stable official repositories. Testing repos and anything
@@ -1667,6 +1763,7 @@ def enable_repo(name: str) -> bool:
         bak = append_repo_block(PACMAN_CONF, name, need_root=True)
         info(f"[{name}] added, backup at {bak}")
     info("refreshing package databases...")
+    ensure_pacman_unlocked(yes=False)
     r = run_cmd(["pacman", "-Sy"], need_root=True)
     if r.returncode != 0:
         raise PigError("pacman -Sy failed")
@@ -1713,7 +1810,7 @@ def _native_argv(c: dict) -> list:
             "--sudoloop", pkg]
 
 
-def native_install(c: dict) -> dict:
+def native_install(c: dict, yes: bool = False) -> dict:
     """Install a native candidate and return the record fields."""
     pkg = c["package"]
     argv = _native_argv(c)
@@ -1728,6 +1825,8 @@ def native_install(c: dict) -> dict:
     else:
         info(f"installing {pkg} from {c['repo']}...")
     info("this is a system package and needs sudo")
+    # an abandoned lock from an earlier killed run would stall this one
+    ensure_pacman_unlocked(yes=yes)
     # the AUR helper calls sudo itself; pacman does not
     r = run_cmd(argv, need_root=(c["source"] == "pacman"))
     if r.returncode != 0:
@@ -1937,7 +2036,7 @@ def _install_native(name: str, yes: bool, pkgs: dict) -> int:
         pick = choose_native(name, shown)
     import datetime
     info(f"found {pick['package']}")
-    extra = native_install(pick)
+    extra = native_install(pick, yes)
     record = {"name": name, "url": f"{pick['repo']}/{pick['package']}",
               "source": pick["repo"],
               "installed_at": datetime.datetime.now().astimezone().isoformat(
@@ -2108,7 +2207,7 @@ def _upgrade_native_one(name: str, rec: dict, yes: bool = False) -> bool:
     c = {"source": "pacman" if kind == "pacman" else "aur",
          "package": pkg, "repo": rec.get("repo", kind),
          "version": want}
-    extra = native_install(c)
+    extra = native_install(c, yes)
     rec.pop("version", None)
     rec.pop("helper", None)
     rec.update(extra)

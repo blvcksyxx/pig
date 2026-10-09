@@ -1,5 +1,17 @@
 # changelog
 
+## v1.4.2
+
+- an abandoned pacman lock no longer blocks every later install: pig
+  checks `/proc` for a running package manager and clears a lock that
+  was left behind by a killed run, instead of stopping on
+  "could not lock database"
+- a lock that belongs to a running process is never removed, and a
+  lock younger than a minute is treated as live so a package manager
+  that is just starting is not cut off
+- the removal is verified against the file, so an `rm` that fails
+  quietly is reported as a failure
+
 ## v1.4.1
 
 - fix: the stanza enabling a repository travelled through stdin, which

@@ -229,6 +229,29 @@ Only `core`, `extra` and `multilib` are ever enabled this way; testing
 repositories and anything custom stay your business. With `-y` the
 question is skipped and shown instead.
 
+## the pacman lock
+
+pacman refuses to run while `/var/lib/pacman/db.lck` exists, and a
+package manager that gets killed leaves that file behind — every later
+run then stops on `could not lock database`.
+
+pig tells a live lock from an abandoned one by looking at `/proc` for a
+running `pacman`, `paru`, `yay` or `makepkg`, rather than trusting the
+lock file:
+
+- **nothing running** and the lock at least a minute old: it was
+  abandoned, pig removes it and continues. With `-y` it says so
+  instead of asking;
+- **something running**: pig refuses and tells you to wait. It will not
+  remove a lock belonging to a live process — that would corrupt
+  somebody else's transaction;
+- **lock younger than a minute**: treated as live, because a package
+  manager may be starting at that moment.
+
+pig cannot give itself priority over a running package manager; trying
+would be a way to corrupt someone's install. What it can do is stop an
+interrupted run from blocking every future one.
+
 A `.deb` entry that pig cannot install here — no `dpkg` — is not an
 error either: it falls through to the same search, so a dictionary
 written for Debian still finds its packages on Arch.
@@ -442,4 +465,4 @@ Copyright (c) 2026 @blvcksyxx
 
 ## changelog
 
-See `CHANGELOG.md`. Current release: `v1.4.1`.
+See `CHANGELOG.md`. Current release: `v1.4.2`.
