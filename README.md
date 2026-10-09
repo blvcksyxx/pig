@@ -442,4 +442,4 @@ Copyright (c) 2026 @blvcksyxx
 
 ## changelog
 
-See `CHANGELOG.md`. Current release: `v1.4.0`.
+See `CHANGELOG.md`. Current release: `v1.4.1`.

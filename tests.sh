@@ -663,6 +663,28 @@ check(active("core") == 1,
       f"an existing stanza must not be duplicated, got {active('core')}")
 check(active("custom") == 0,
       "a commented stanza must stay commented")
+# the stanza must not travel through stdin: under `sudo -S` the password
+# is read from there and would swallow it
+seen = {}
+real_run = pig.run_cmd
+def spy(argv, need_root=False, stdin=None):
+    seen["stdin"] = stdin
+    return real_run(argv, need_root=need_root, stdin=stdin)
+pig.run_cmd = spy
+conf2 = tmp / "stdin-test.conf"
+conf2.write_text("[core]\n")
+pig.append_repo_block(conf2, "multilib", backup=False)
+pig.run_cmd = real_run
+check(seen["stdin"] is None,
+      f"the append must not use stdin, got {seen['stdin']!r}")
+check(active("multilib") >= 1, "the stanza must still be written")
+# an odd repository name must be refused before it reaches a shell
+for bad in ("evil]; rm -rf /", "a b", "x/y", ""):
+    try:
+        pig.repo_block(bad)
+        fail.append(f"repo_block must refuse {bad!r}")
+    except pig.PigError:
+        pass
 pig.PACMAN_CONF = saved
 import shutil as _sh
 _sh.rmtree(tmp, ignore_errors=True)

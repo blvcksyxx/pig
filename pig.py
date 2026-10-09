@@ -33,7 +33,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-VERSION = "1.4.0"
+VERSION = "1.4.1"
 OFFICIAL_DICT_URL = "https://github.com/blvcksyxx/pig/raw/refs/heads/main/pig.txt"
 OFFICIAL_ARCH_DICT_URL = "https://github.com/blvcksyxx/pig/raw/refs/heads/main/pig-arch.txt"
 OFFICIAL_PIG_URL = "https://github.com/blvcksyxx/pig/raw/refs/heads/main/pig.py"
@@ -1582,36 +1582,63 @@ def _pacman_conf_tail() -> str:
         return ""
 
 
+_REPO_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
 def repo_block(name: str) -> str:
     """The stanza that turns a repository on."""
+    if not _REPO_NAME_RE.match(name or ""):
+        raise PigError(f"refusing odd repository name: {name!r}")
     return f"\n[{name}]\nInclude = /etc/pacman.d/mirrorlist\n"
 
 
-def append_repo_block(conf: Path, name: str, backup: bool = True) -> str:
+def _shell_quote(s: str) -> str:
+    return "'" + str(s).replace("'", "'\\''") + "'"
+
+
+def append_repo_block(conf: Path, name: str, backup: bool = True,
+                      need_root: bool = False) -> str:
     """Append [name] to a pacman config file, backing it up first.
 
     Appends instead of rewriting, so commented-out stanzas and custom
     settings survive, and confirms the result before returning the path
     of the backup. Idempotent: a stanza that is already there is left
-    alone and an empty string is returned. Separated from `enable_repo`
-    so the file handling can be exercised without root.
+    alone and an empty string is returned.
+
+    The stanza travels through a temporary file, never through stdin:
+    when pig runs under `sudo -S` the password is read from stdin and
+    would swallow the content.
+
+    `need_root` is required for a config under /etc; it is left off so
+    the file handling can be exercised against a temporary copy.
     """
     bak = f"{conf}.pig-bak"
+    block = repo_block(name)  # validates the name before it reaches a shell
     try:
         text = conf.read_text(encoding="utf-8", errors="replace")
     except OSError as e:
         raise PigError(f"cannot read {conf}: {e}")
     if re.search(r"^\s*\[" + re.escape(name) + r"\]\s*$", text, re.M):
         return ""  # already enabled, nothing to write
-    block = repo_block(name).encode("utf-8")
-    if backup:
-        r = run_cmd(["cp", "-n", str(conf), bak])
+    fd, tmp = tempfile.mkstemp(prefix="pig-repo-", suffix=".conf")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(block)
+        if backup:
+            r = run_cmd(["cp", "-n", str(conf), bak], need_root=need_root)
+            if r.returncode != 0:
+                raise PigError(f"cannot back up {conf}")
+        r = run_cmd(["sh", "-c", "cat < %s >> %s"
+                     % (_shell_quote(tmp), _shell_quote(conf))],
+                    need_root=need_root)
         if r.returncode != 0:
-            raise PigError(f"cannot back up {conf}")
-    r = run_cmd(["sh", "-c", f"cat >> {conf}"], stdin=block)
-    if r.returncode != 0:
-        raise PigError(f"cannot update {conf}" +
-                       (f"; a backup is at {bak}" if backup else ""))
+            raise PigError(f"cannot update {conf}" +
+                           (f"; a backup is at {bak}" if backup else ""))
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
     # verify rather than trust: a partial write must not pass silently
     try:
         text = conf.read_text(encoding="utf-8", errors="replace")
@@ -1637,7 +1664,7 @@ def enable_repo(name: str) -> bool:
         info(f"[{name}] is already in {PACMAN_CONF}")
     else:
         info(f"adding [{name}] to {PACMAN_CONF} (needs sudo)")
-        bak = append_repo_block(PACMAN_CONF, name)
+        bak = append_repo_block(PACMAN_CONF, name, need_root=True)
         info(f"[{name}] added, backup at {bak}")
     info("refreshing package databases...")
     r = run_cmd(["pacman", "-Sy"], need_root=True)

@@ -1,5 +1,15 @@
 # changelog
 
+## v1.4.1
+
+- fix: the stanza enabling a repository travelled through stdin, which
+  `sudo -S` consumes for the password, so the write silently did
+  nothing; it now travels through a temporary file and the result is
+  verified by reading the file back
+- fix: the backup and the append lost `need_root`, so writing
+  /etc/pacman.conf failed with "Permission denied"
+- repository names are validated before being put into a shell command
+
 ## v1.4.0
 
 - fuzzy package names: exact, prefix, substring, shared abbreviation,
