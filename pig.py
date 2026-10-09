@@ -33,7 +33,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-VERSION = "1.2.0"
+VERSION = "1.4.0"
 OFFICIAL_DICT_URL = "https://github.com/blvcksyxx/pig/raw/refs/heads/main/pig.txt"
 OFFICIAL_ARCH_DICT_URL = "https://github.com/blvcksyxx/pig/raw/refs/heads/main/pig-arch.txt"
 OFFICIAL_PIG_URL = "https://github.com/blvcksyxx/pig/raw/refs/heads/main/pig.py"
@@ -199,6 +199,11 @@ def cmd_doctor():
     for t in ("dpkg", "dpkg-deb", "sudo"):
         tools.append(f"{t} {'ok' if shutil.which(t) else 'missing'}")
     print("tools: " + ", ".join(tools))
+    if shutil.which("pacman") is not None:
+        helper = native_helper()
+        repos = ", ".join(enabled_repos()) or "none"
+        print(f"native: pacman, repositories: {repos}, "
+              f"aur helper: {helper or 'missing (AUR installs unavailable)'}")
     cp = config_path()
     print(f"config: {cp} ({'present' if cp.exists() else 'missing'})")
     if cp.exists():
@@ -525,6 +530,22 @@ def find_package(name: str, by_source: dict):
     return out
 
 
+def fuzzy_dict_matches(name: str, by_source: dict, limit: int = 6):
+    """Dictionary names close enough to `name` to be worth suggesting.
+
+    Only used to say "did you mean", never to install: a fuzzy
+    dictionary hit must never be picked without asking.
+    """
+    out = []
+    for src, (_, entries) in by_source.items():
+        for key in entries:
+            d = name_distance(name, key)
+            if d is not None:
+                out.append((d, src, key))
+    out.sort()
+    return [(src, key) for _, src, key in out[:limit]]
+
+
 def choose_source(name: str, candidates) -> tuple:
     print(f"found {name} in:")
     for i, (src, _) in enumerate(candidates, 1):
@@ -708,12 +729,12 @@ def require_cmd(name: str):
         raise PigError(f"missing system command: {name}")
 
 
-def run_cmd(argv, need_root: bool = False):
+def run_cmd(argv, need_root: bool = False, stdin: bytes = None):
     if need_root and os.geteuid() != 0:
         require_cmd("sudo")
         argv = ["sudo"] + argv
     try:
-        return subprocess.run(argv)
+        return subprocess.run(argv, input=stdin)
     except FileNotFoundError:
         raise PigError(f"missing system command: {argv[0]}")
     except PermissionError:
@@ -1148,6 +1169,610 @@ def do_install_file(name: str, url: str, tmpdir: Path) -> dict:
     raise PigError("install failed")  # unreachable
 
 
+# ---------- fuzzy matching ----------
+
+def _norm(s: str) -> str:
+    """Lowercase and drop everything that is not a letter or digit."""
+    return re.sub(r"[^a-z0-9]", "", (s or "").lower())
+
+
+def _subsequence(needle: str, hay: str) -> bool:
+    """True when every character of needle appears in order inside hay."""
+    it = iter(hay)
+    return all(ch in it for ch in needle)
+
+
+def _levenshtein(a: str, b: str, limit: int) -> int:
+    """Edit distance, abandoned once it is known to exceed limit.
+
+    Returns limit + 1 as soon as no remaining path can get under it,
+    which keeps long unrelated names cheap to compare.
+    """
+    if abs(len(a) - len(b)) > limit:
+        return limit + 1
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i] + [0] * len(b)
+        best = cur[0]
+        for j, cb in enumerate(b, 1):
+            cur[j] = min(prev[j] + 1, cur[j - 1] + 1,
+                         prev[j - 1] + (ca != cb))
+            best = min(best, cur[j])
+        if best > limit:
+            return limit + 1
+        prev = cur
+    return prev[-1]
+
+
+def _common_prefix(a: str, b: str) -> int:
+    n = 0
+    for x, y in zip(a, b):
+        if x != y:
+            break
+        n += 1
+    return n
+
+
+def name_distance(query: str, name: str):
+    """How close `name` is to `query`, or None when it is not close.
+
+    Recognises, in order of confidence: an exact name, a prefix, a
+    substring, a shared abbreviation ("chrome" -> "chromium"), letters
+    in order ("tgrm" -> "telegram") and a small number of typos. The
+    numbers are ranking tiers, not probabilities: lower is better, and
+    None means "no relation worth showing".
+    """
+    q, n = _norm(query), _norm(name)
+    if not q or not n:
+        return None
+    if q == n:
+        return 0
+    # a one or two letter query must not match anything but itself:
+    # "a" would otherwise be a prefix of half of every repository
+    if len(q) < 3:
+        return None
+    if n.startswith(q):
+        return 1
+    if q in n:
+        return 2
+    # shared abbreviation: at least four leading characters, so "chrome"
+    # reaches "chromium" but "git" does not swallow "gimp"
+    if min(len(q), len(n)) >= 4 and _common_prefix(q, n) >= 4:
+        return 3
+    if _subsequence(q, n):
+        return 4
+    # typos: only for names of comparable length, otherwise "a" would
+    # match half the dictionary
+    tol = 1 if max(len(q), len(n)) <= 4 else 2
+    if len(q) >= 3 and _levenshtein(q, n, tol) <= tol:
+        return 5
+    return None
+
+
+# ---------- native packages (pacman + AUR) ----------
+#
+# On Arch-family distributions the dictionaries only reach so far. When a
+# name is in no dictionary, pig falls back to the system package manager
+# and the AUR, shows what it found and lets the user pick.
+#
+# These are system packages: they go through sudo and land outside
+# ~/.local. Records carry type "native" so remove/info/upgrade can act
+# on them too.
+
+NATIVE_AUR_RPC = "https://aur.archlinux.org/rpc/v5"
+NATIVE_ARCH_API = "https://archlinux.org/packages/search/json/"
+NATIVE_AUR_HELPERS = ("paru", "yay")
+NATIVE_MAX_SHOWN = 10
+
+
+def native_supported() -> bool:
+    """Native installs need a system package manager to delegate to."""
+    return shutil.which("pacman") is not None
+
+
+def deb_supported() -> bool:
+    return shutil.which("dpkg") is not None
+
+
+def dict_entry_installable(url: str) -> bool:
+    """Can this dictionary entry be installed here at all?
+
+    Only .deb is gated: it needs dpkg, which pacman systems do not ship.
+    Extensionless urls are left alone - their real type is only known
+    after the download resolves, and archives and shell installers work
+    everywhere.
+    """
+    if detect_type(url) == "deb":
+        return deb_supported()
+    return True
+
+
+def native_helper() -> str:
+    """AUR helper, paru before yay. Empty string when neither exists."""
+    for h in NATIVE_AUR_HELPERS:
+        if shutil.which(h) is not None:
+            return h
+    return ""
+
+
+def enabled_repos() -> list:
+    """Repositories pacman is configured to use, in order."""
+    try:
+        r = subprocess.run(["pacman-conf", "--repo-list"],
+                           capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if r.returncode != 0:
+        return []
+    return [x.strip() for x in r.stdout.splitlines() if x.strip()]
+
+
+def _pacman_candidates(query: str):
+    """`pacman -Ss <query>` parsed into candidate dicts."""
+    try:
+        r = subprocess.run(["pacman", "-Ss", query],
+                           capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if r.returncode != 0:
+        return []
+    out = []
+    for line in r.stdout.splitlines():
+        if not line.strip():
+            continue
+        if line.startswith(" "):
+            if out:
+                out[-1]["description"] = line.strip()
+            continue
+        head = line.split(None, 1)
+        if not head:
+            continue
+        repo, sep, rest = head[0].partition("/")
+        if not sep:
+            continue
+        parts = rest.split()
+        if not parts:
+            continue
+        out.append({
+            "source": "pacman", "repo": repo, "package": parts[0],
+            "version": parts[1] if len(parts) > 1 else "",
+            "installed": "[installed]" in line,
+            "votes": 0, "popularity": 0.0, "outdated": False,
+            "description": "",
+        })
+    return out
+
+
+def _aur_candidates(query: str):
+    """AUR RPC name/description search parsed into candidate dicts."""
+    url = (f"{NATIVE_AUR_RPC}/search/"
+           f"{urllib.parse.quote(query)}?by=name-desc")
+    try:
+        req = urllib.request.Request(
+            url, headers={"User-Agent": f"pig/{VERSION}"})
+        with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+            data = json.loads(r.read().decode("utf-8"))
+    except (urllib.error.URLError, OSError, ValueError, TimeoutError):
+        return []
+    out = []
+    for x in data.get("results", []) or []:
+        name = x.get("Name") or ""
+        if not name:
+            continue
+        out.append({
+            "source": "aur", "repo": "aur", "package": name,
+            "version": x.get("Version") or "",
+            "installed": False,
+            "votes": x.get("NumVotes") or 0,
+            "popularity": float(x.get("Popularity") or 0.0),
+            "outdated": bool(x.get("OutOfDate")),
+            "description": (x.get("Description") or "").strip(),
+        })
+    return out
+
+
+def rank_native(query: str, cands: list, variants=None) -> list:
+    """Order candidates: closest name first, official repos before AUR.
+
+    A candidate is scored by `name_distance` against every spelling of
+    the query; a description-only hit ranks after every name match.
+    Within the same rank an official repository wins over the AUR, and
+    inside the AUR the more popular package wins. Candidates that match
+    no spelling at all are dropped, so "not found" stays honest.
+    Pure function: no network, no subprocesses.
+    """
+    qs = [query.strip().lower()]
+    for v in (variants or []):
+        v = v.strip().lower()
+        if v and v not in qs:
+            qs.append(v)
+
+    def tier_for(c):
+        best = None
+        for q in qs:
+            d = name_distance(q, c.get("package", ""))
+            if d is not None and (best is None or d < best):
+                best = d
+        if best is not None:
+            return best
+        q0 = qs[0] if qs else ""
+        if q0 and q0 in (c.get("description", "") or "").lower():
+            return 5
+        return 99
+
+    def votes_of(c):
+        # data comes from two parsers; never let a bad value break ranking
+        try:
+            return -int(c.get("votes") or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def name_gap(c):
+        # at equal confidence, a name of similar length is the likelier
+        # intent: "tgrm" is meant to be "telegram", not "trgmpeg-launcher"
+        n = _norm(c.get("package", ""))
+        q = _norm(qs[0]) if qs else ""
+        return abs(len(n) - len(q)) if (n and q) else 0
+
+    def key(c):
+        official = 0 if c.get("source") == "pacman" else 1
+        return (tier_for(c), name_gap(c), official, votes_of(c),
+                c.get("package", ""))
+
+    # With a short query the backends' own matching is the only
+    # relevance signal left, so their results are kept and sorted last
+    # instead of discarded. A long query can afford to drop what does
+    # not relate to it, which is what keeps "not found" honest.
+    strict = len(_norm(qs[0])) >= 3 if qs else True
+
+    seen = set()
+    uniq = []
+    for c in sorted(cands, key=key):
+        if strict and tier_for(c) >= 99:
+            continue  # matched no spelling of the query and no description
+        k = (c.get("source"), c.get("package"))
+        if k in seen:
+            continue
+        seen.add(k)
+        uniq.append(c)
+    return uniq
+
+
+def query_variants(query: str) -> list:
+    """Alternative spellings to search for when separators differ."""
+    out = []
+    stripped = query.replace("-", "").replace("_", "").replace(" ", "")
+    if stripped and stripped != query:
+        out.append(stripped)
+    return out
+
+
+def native_search(query: str):
+    """Every pacman/AUR candidate for query, best first. Best effort."""
+    cands = []
+    for q in [query] + query_variants(query):
+        try:
+            cands.extend(_pacman_candidates(q))
+        except Exception:
+            pass
+        try:
+            cands.extend(_aur_candidates(q))
+        except Exception:
+            pass
+    return rank_native(query, cands, query_variants(query))
+
+
+def _sync_packages():
+    """(repo, name, version) for every package in the sync databases."""
+    try:
+        r = subprocess.run(["pacman", "-Sl"],
+                           capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if r.returncode != 0:
+        return []
+    out = []
+    for line in r.stdout.splitlines():
+        parts = line.split()
+        if len(parts) < 3:
+            continue
+        ver = parts[2].split("[")[0]
+        out.append((parts[0], parts[1], ver))
+    return out
+
+
+def native_search_recovery(query: str):
+    """Wider search for a name nothing was found for.
+
+    Two passes, in order:
+
+    1. a stem search - the query shortened from the right. `pacman -Ss`
+       and the AUR both match substrings, so "veskp" still reaches
+       "vesktop" through the stem "vesk";
+    2. a local scan of every package in the enabled repositories,
+       compared with `name_distance`. This catches real typos
+       ("discor" -> "discord") that no substring search can find.
+
+    The AUR has no bulk listing, so a typo in an AUR-only package name
+    stays unreachable. Candidates are only ever shown, never installed
+    without an exact name match.
+    """
+    q = _norm(query)
+    cands = []
+    stem = q[:-1] if len(q) >= 5 else ""
+    if stem:
+        try:
+            cands.extend(_pacman_candidates(stem))
+        except Exception:
+            pass
+        try:
+            cands.extend(_aur_candidates(stem))
+        except Exception:
+            pass
+    # official repositories: full local scan. Only the strong signals are
+    # kept here - scanning 15000 names with the weak ones buries the
+    # answer under "python-aiogram" and friends.
+    hits = []
+    for repo, name, ver in _sync_packages():
+        d = name_distance(query, name)
+        if d is not None and d <= 3:
+            hits.append({"source": "pacman", "repo": repo, "package": name,
+                         "version": ver, "installed": False, "votes": 0,
+                         "popularity": 0.0, "outdated": False,
+                         "description": ""})
+    cands.extend(hits)
+    return rank_native(query, cands, [q])
+
+
+def native_disabled_repos(name: str) -> list:
+    """Official repositories holding `name` that this machine has off.
+
+    Queried from archlinux.org, so it knows about repositories that are
+    not in the local sync databases yet.
+    """
+    try:
+        req = urllib.request.Request(
+            NATIVE_ARCH_API + "?name=" + urllib.parse.quote(name),
+            headers={"User-Agent": f"pig/{VERSION}"})
+        with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+            data = json.loads(r.read().decode("utf-8"))
+    except (urllib.error.URLError, OSError, ValueError, TimeoutError):
+        return []
+    on = set(enabled_repos())
+    off = set()
+    for x in data.get("results", []) or []:
+        repo = x.get("repo") or ""
+        if repo and repo not in on:
+            off.add(repo)
+    return sorted(off)
+
+
+def native_repo_hint(name: str) -> str:
+    """If the name exists in a repository pacman has disabled, say so."""
+    off = native_disabled_repos(name)
+    if not off:
+        return ""
+    on = ", ".join(enabled_repos()) or "none"
+    return (f"'{name}' exists in the {', '.join(off)} repository, which is "
+            f"not enabled (enabled: {on})")
+
+
+# ---------- enabling a pacman repository ----------
+
+# Only the stable official repositories. Testing repos and anything
+# custom stay the user's business.
+NATIVE_ENABLEABLE_REPOS = ("core", "extra", "multilib")
+PACMAN_CONF = Path("/etc/pacman.conf")
+
+
+def repo_in_conf(name: str) -> bool:
+    """Is [name] already present in /etc/pacman.conf?"""
+    try:
+        text = PACMAN_CONF.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return re.search(r"^\s*\[" + re.escape(name) + r"\]\s*$",
+                     text, re.M) is not None
+
+
+def _pacman_conf_tail() -> str:
+    try:
+        return PACMAN_CONF.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def repo_block(name: str) -> str:
+    """The stanza that turns a repository on."""
+    return f"\n[{name}]\nInclude = /etc/pacman.d/mirrorlist\n"
+
+
+def append_repo_block(conf: Path, name: str, backup: bool = True) -> str:
+    """Append [name] to a pacman config file, backing it up first.
+
+    Appends instead of rewriting, so commented-out stanzas and custom
+    settings survive, and confirms the result before returning the path
+    of the backup. Idempotent: a stanza that is already there is left
+    alone and an empty string is returned. Separated from `enable_repo`
+    so the file handling can be exercised without root.
+    """
+    bak = f"{conf}.pig-bak"
+    try:
+        text = conf.read_text(encoding="utf-8", errors="replace")
+    except OSError as e:
+        raise PigError(f"cannot read {conf}: {e}")
+    if re.search(r"^\s*\[" + re.escape(name) + r"\]\s*$", text, re.M):
+        return ""  # already enabled, nothing to write
+    block = repo_block(name).encode("utf-8")
+    if backup:
+        r = run_cmd(["cp", "-n", str(conf), bak])
+        if r.returncode != 0:
+            raise PigError(f"cannot back up {conf}")
+    r = run_cmd(["sh", "-c", f"cat >> {conf}"], stdin=block)
+    if r.returncode != 0:
+        raise PigError(f"cannot update {conf}" +
+                       (f"; a backup is at {bak}" if backup else ""))
+    # verify rather than trust: a partial write must not pass silently
+    try:
+        text = conf.read_text(encoding="utf-8", errors="replace")
+    except OSError as e:
+        raise PigError(f"cannot read {conf} back: {e}")
+    if not re.search(r"^\s*\[" + re.escape(name) + r"\]\s*$", text, re.M):
+        raise PigError(f"could not confirm [{name}] in {conf}" +
+                       (f"; a backup is at {bak}" if backup else ""))
+    return bak if backup else ""
+
+
+def enable_repo(name: str) -> bool:
+    """Add [name] to /etc/pacman.conf and refresh the sync databases.
+
+    Returns True when the repository ends up enabled. Only the stable
+    official repositories are allowed; anything else is the user's call.
+    """
+    if name not in NATIVE_ENABLEABLE_REPOS:
+        raise PigError(
+            f"pig only enables {', '.join(NATIVE_ENABLEABLE_REPOS)}; "
+            f"add [{name}] to {PACMAN_CONF} yourself")
+    if repo_in_conf(name):
+        info(f"[{name}] is already in {PACMAN_CONF}")
+    else:
+        info(f"adding [{name}] to {PACMAN_CONF} (needs sudo)")
+        bak = append_repo_block(PACMAN_CONF, name)
+        info(f"[{name}] added, backup at {bak}")
+    info("refreshing package databases...")
+    r = run_cmd(["pacman", "-Sy"], need_root=True)
+    if r.returncode != 0:
+        raise PigError("pacman -Sy failed")
+    return name in enabled_repos()
+
+
+def native_description(c: dict) -> str:
+    bits = [f"{c.get('repo', '?')}/{c.get('package', '?')} "
+            f"{c.get('version') or '?'}"]
+    if c.get("source") == "aur":
+        bits[0] += f" (AUR, {c.get('votes') or 0} votes"
+        bits[0] += ", outdated)" if c.get("outdated") else ")"
+    if c.get("installed"):
+        bits.append("installed")
+    return " ".join(bits)
+
+
+def choose_native(name: str, cands: list) -> dict:
+    """Show ranked candidates and let the user pick one."""
+    print(f"'{name}' is not in any dictionary, found in the package manager:")
+    for i, c in enumerate(cands, 1):
+        print(f"  {i}. {native_description(c)}")
+        if c.get("description"):
+            print(f"       {c['description']}")
+    try:
+        raw = input(f"choose package [1-{len(cands)}]: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        raise PigError("cancelled")
+    if not raw.isdigit():
+        raise PigError("invalid choice")
+    n = int(raw)
+    if n < 1 or n > len(cands):
+        raise PigError("invalid choice")
+    return cands[n - 1]
+
+
+def _native_argv(c: dict) -> list:
+    """Install command for a candidate. AUR goes through the helper."""
+    pkg = c["package"]
+    if c["source"] == "pacman":
+        return ["pacman", "-S", "--needed", "--noconfirm", pkg]
+    return [native_helper() or "paru", "-S", "--needed", "--noconfirm",
+            "--sudoloop", pkg]
+
+
+def native_install(c: dict) -> dict:
+    """Install a native candidate and return the record fields."""
+    pkg = c["package"]
+    argv = _native_argv(c)
+    kind = "pacman" if c["source"] == "pacman" else "aur"
+    if c["source"] != "pacman":
+        h = native_helper()
+        if not h:
+            raise PigError(
+                f"'{pkg}' is in the AUR, which needs an AUR helper: "
+                f"install one of {', '.join(NATIVE_AUR_HELPERS)}")
+        info(f"installing {pkg} from the AUR via {h}...")
+    else:
+        info(f"installing {pkg} from {c['repo']}...")
+    info("this is a system package and needs sudo")
+    # the AUR helper calls sudo itself; pacman does not
+    r = run_cmd(argv, need_root=(c["source"] == "pacman"))
+    if r.returncode != 0:
+        raise PigError(f"install of '{pkg}' failed (exit {r.returncode})")
+    version = native_installed_version(pkg) or c.get("version", "")
+    return {"type": "native", "native_source": kind, "package": pkg,
+            "repo": c.get("repo", ""), "version": version,
+            "helper": native_helper() if kind == "aur" else ""}
+
+
+def native_installed_version(pkg: str) -> str:
+    """Version currently installed according to the local database."""
+    try:
+        r = subprocess.run(["pacman", "-Q", pkg],
+                           capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    if r.returncode != 0:
+        return ""
+    parts = r.stdout.split()
+    return parts[1] if len(parts) > 1 else ""
+
+
+def native_repo_version(pkg: str, kind: str) -> str:
+    """Version the package manager would install right now."""
+    argv = ["pacman", "-Si", pkg]
+    if kind == "aur" and native_helper():
+        argv = [native_helper(), "-Si", pkg]
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    if r.returncode != 0:
+        return ""
+    for line in r.stdout.splitlines():
+        if line.startswith("Version"):
+            return line.split(":", 1)[1].strip()
+    return ""
+
+
+def version_cmp(a: str, b: str) -> int:
+    """Compare versions the way pacman does. Falls back to strings."""
+    if a == b:
+        return 0
+    if shutil.which("vercmp") is not None and a and b:
+        try:
+            r = subprocess.run(["vercmp", a, b],
+                               capture_output=True, text=True, timeout=10)
+            if r.returncode in (0, 1, 2):
+                return int(r.stdout.strip() or 0)
+        except (OSError, subprocess.SubprocessError, ValueError):
+            pass
+    return (a > b) - (a < b)
+
+
+def native_remove(rec: dict) -> None:
+    """Remove a native package through pacman or the AUR helper."""
+    pkg = rec.get("package")
+    if not pkg:
+        raise PigError("cannot remove: no package name recorded")
+    kind = rec.get("native_source", "pacman")
+    if kind == "aur" and native_helper():
+        h = native_helper()
+        info(f"removing {pkg} via {h}...")
+        r = run_cmd([h, "-Rns", "--noconfirm", pkg])
+    else:
+        info(f"removing {pkg} via pacman...")
+        r = run_cmd(["pacman", "-Rns", "--noconfirm", pkg], need_root=True)
+    if r.returncode != 0:
+        raise PigError(f"failed to remove '{pkg}' (exit {r.returncode})")
+
+
 # ---------- commands ----------
 
 def cmd_search(query: str):
@@ -1193,15 +1818,134 @@ def cmd_list():
     return 0
 
 
+def _native_suggest_suffix(name: str) -> str:
+    """Near-miss hint built from what the package manager actually has."""
+    try:
+        found = native_search_recovery(name)
+    except Exception:
+        return ""
+    keys = []
+    for c in found[:5]:
+        if c["package"] not in keys:
+            keys.append(c["package"])
+    if not keys:
+        return ""
+    return ("; closest: " + ", ".join(keys) +
+            "? (run without -y to choose)")
+
+
+def _try_enable_repos(name: str, yes: bool) -> list:
+    """Offer to switch on official repositories that hold `name`.
+
+    A package can be a real one sitting in a repository this machine has
+    never enabled - steam lives in multilib. Enabling it is a small,
+    reversible, backed-up edit, and without it the AUR would only offer
+    lookalikes.
+    """
+    off = native_disabled_repos(name)
+    if not off:
+        return []
+    on = ", ".join(enabled_repos()) or "none"
+    info(f"'{name}' is in the {', '.join(off)} repository, "
+         f"which is not enabled (enabled: {on})")
+    enabled = []
+    for repo in off:
+        if repo not in NATIVE_ENABLEABLE_REPOS:
+            info(f"pig does not edit [{repo}] automatically; "
+                 f"add it to {PACMAN_CONF} yourself if you want it")
+            continue
+        prompt = f"enable [{repo}] and refresh the package databases?"
+        if yes:
+            info(prompt + " (-y)")
+        else:
+            try:
+                raw = input(f"{prompt} [y/N]: ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                raise PigError("cancelled")
+            if raw != "y":
+                info(f"leaving [{repo}] disabled")
+                continue
+        if enable_repo(repo):
+            enabled.append(repo)
+            info(f"[{repo}] is now enabled")
+        else:
+            err(f"could not enable [{repo}]")
+    return enabled
+
+
+def _suggest_suffix(name: str, by_source: dict) -> str:
+    """"did you mean ..." text for a name nothing was found for."""
+    near = fuzzy_dict_matches(name, by_source)
+    if not near:
+        return ""
+    keys = []
+    for _, key in near:
+        if key not in keys:
+            keys.append(key)
+    return ("; did you mean: " + ", ".join(keys[:5]) +
+            "? (add it to your dictionary)")
+
+
+def _install_native(name: str, yes: bool, pkgs: dict) -> int:
+    """Fallback path: install `name` from pacman or the AUR."""
+    # a disabled repository may hold the real package: deal with it first
+    # so the search below sees a complete picture
+    _try_enable_repos(name, yes)
+    found = native_search(name)
+    shown = found[:NATIVE_MAX_SHOWN]
+    exact = [c for c in shown if c["package"].lower() == name.lower()]
+    if len(exact) == 1:
+        # unambiguous exact name match needs no question, -y or not
+        pick = exact[0]
+    else:
+        if not shown:
+            raise PigError(f"package '{name}' not found in dictionaries, "
+                           f"pacman repositories or the AUR" +
+                           _native_suggest_suffix(name))
+        if len(found) > len(shown):
+            info(f"{len(found) - len(shown)} more match(es) not shown")
+        # anything less than exact asks, even under -y: a wrong guess here
+        # writes to the system, not to ~/.local
+        pick = choose_native(name, shown)
+    import datetime
+    info(f"found {pick['package']}")
+    extra = native_install(pick)
+    record = {"name": name, "url": f"{pick['repo']}/{pick['package']}",
+              "source": pick["repo"],
+              "installed_at": datetime.datetime.now().astimezone().isoformat(
+                  timespec="seconds")}
+    record.update(extra)
+    pkgs[name] = record
+    save_installed(pkgs)
+    info("done")
+    return 0
+
+
 def cmd_install(name: str, yes: bool = False):
     ensure_dirs()
     by_source, errors = load_all_dicts()
     for e in errors:
         info(f"warning: {e}")
     cands = find_package(name, by_source)
-    if not cands:
-        raise PigError(f"package '{name}' not found")
     pkgs = load_installed()
+    if cands:
+        # a .deb entry is useless where dpkg does not exist; rather than
+        # failing on dpkg-deb, look the name up in the package manager
+        usable = [c for c in cands if dict_entry_installable(c[1])]
+        if not usable:
+            if native_supported():
+                info(f"the dictionaries only have a .deb build of {name}, "
+                     f"which needs dpkg; searching the package manager")
+                return _install_native(name, yes, pkgs)
+        else:
+            cands = usable
+    if not cands:
+        # not in any dictionary: fall back to the system package manager
+        if native_supported():
+            return _install_native(name, yes, pkgs)
+        raise PigError(f"package '{name}' not found" +
+                       _suggest_suffix(name, by_source))
     if name in pkgs and not yes:
         print(f"{name} is already installed")
         try:
@@ -1240,7 +1984,9 @@ def cmd_remove(name: str):
         raise PigError(f"package '{name}' is not installed via pig")
     rec = pkgs[name]
     ftype = rec.get("type", "unknown")
-    if ftype == "deb":
+    if ftype == "native":
+        native_remove(rec)
+    elif ftype == "deb":
         pkg = rec.get("package")
         if not pkg:
             raise PigError(f"cannot remove '{name}': unknown deb package name")
@@ -1298,6 +2044,53 @@ def cmd_remove(name: str):
     return 0
 
 
+def _upgrade_native_one(name: str, rec: dict, yes: bool = False) -> bool:
+    """Upgrade a package installed through pacman or the AUR.
+
+    Compares the recorded version with what the package manager offers
+    now; only a real version bump triggers an install. Version order is
+    decided by `vercmp`, not by string comparison, so epochs and
+    package release numbers behave.
+    """
+    import datetime
+    pkg = rec.get("package")
+    if not pkg:
+        info(f"{name}: no package name recorded, skipping")
+        return False
+    kind = rec.get("native_source", "pacman")
+    have = native_installed_version(pkg) or rec.get("version", "")
+    want = native_repo_version(pkg, kind)
+    if not want:
+        info(f"{name}: package manager reports no version, skipping")
+        return False
+    if not have:
+        info(f"{name}: no installed version recorded, skipping")
+        return False
+    if version_cmp(have, want) >= 0:
+        info(f"{name} is up to date ({have})")
+        return False
+    info(f"{name}: {have} -> {want}")
+    if not yes:
+        try:
+            raw = input(f"upgrade {pkg}? [y/N]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            raise PigError("cancelled")
+        if raw != "y":
+            return False
+    c = {"source": "pacman" if kind == "pacman" else "aur",
+         "package": pkg, "repo": rec.get("repo", kind),
+         "version": want}
+    extra = native_install(c)
+    rec.pop("version", None)
+    rec.pop("helper", None)
+    rec.update(extra)
+    rec["installed_at"] = datetime.datetime.now().astimezone().isoformat(
+        timespec="seconds")
+    info(f"{name} upgraded")
+    return True
+
+
 def cmd_upgrade(yes: bool = False):
     ensure_dirs()
     pkgs = load_installed()
@@ -1311,6 +2104,10 @@ def cmd_upgrade(yes: bool = False):
     failed = []
     for name in sorted(pkgs):
         try:
+            if pkgs[name].get("type") == "native":
+                if _upgrade_native_one(name, pkgs[name], yes):
+                    changed += 1
+                continue
             if _upgrade_one(name, pkgs, by_source, yes):
                 changed += 1
         except PigError as e:
@@ -1544,6 +2341,11 @@ def cmd_info(name: str):
             print(f"version: {rec['version']}")
         print(f"url: {rec.get('url', '?')}")
         print("installed: yes")
+        if rec.get("type") == "native":
+            kind = rec.get("native_source", "pacman")
+            via = "pacman" if kind == "pacman" else (
+                rec.get("helper") or native_helper() or kind)
+            print(f"installed by: {via} (system package)")
         if rec.get("path"):
             print(f"path: {_short(rec['path'])}")
         if rec.get("launcher"):

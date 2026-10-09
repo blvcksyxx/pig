@@ -3,8 +3,12 @@
 pig installs linux applications from plain-text dictionaries.
 
 One executable python file, standard library only. No dependencies,
-no database, no background processes. It does not replace apt and does
-not manage system packages.
+no database, no background processes. It does not replace apt.
+
+Archives and shell installers are user-local: they land in `~/.local`
+and need no root. On pacman systems a name that no dictionary knows is
+handed to `pacman` or the AUR instead — those are real system packages
+and they go through `sudo` (see "system packages").
 
 ## features
 
@@ -14,6 +18,8 @@ not manage system packages.
 - multiple dictionaries, aliases, per-source conflict choice
 - url-based upgrade, self-update, temp cache cleanup
 - user-local install, no sudo by default
+- fallback to the system package manager: a name no dictionary knows is
+  looked up in `pacman` and the AUR (see "system packages")
 - per-distro dictionary: `pig-arch.txt` is selected automatically on
   distributions without `dpkg` (Arch, Fedora, NixOS, ...)
 - distro check (`pig doctor`, see `DISTROS.md`)
@@ -167,13 +173,84 @@ debs = "https://github.com/blvcksyxx/pig/raw/refs/heads/main/pig.txt"
 `pig doctor` then notes `dictionary: pig.txt (expected pig-arch.txt
 for this distro)` so the mismatch stays visible.
 
-`pig-arch.txt` is intentionally shorter. Apps whose vendor ships only
-`.deb`, `.rpm`, `.AppImage` or `.pkg.tar.zst` are left out rather than
-listed and failing: Chrome, Slack, Obsidian, Cursor, Vesktop, GitHub
-Desktop, Steam, Zoom, Unity Hub, Etcher, 1Password, rpi-imager,
-docker-desktop, Happ and RustDesk. Tor Browser is left out too — its
-archive carries no single application binary, and pig refuses to guess
-instead of pointing the launcher at the wrong file.
+`pig-arch.txt` is intentionally shorter: it lists only what pig can
+unpack itself. Apps the vendor ships as `.deb`, `.rpm`, `.AppImage` or
+`.pkg.tar.zst` are not listed there — but most of them are one command
+away in `pacman` or the AUR, which pig finds for you (see "system
+packages" below).
+
+## system packages
+
+When a name is in no dictionary and `pacman` exists, pig looks it up
+in the enabled repositories and in the AUR, then shows what it found:
+
+```text
+$ pig install zoom
+'zoom' is not in any dictionary, found in the package manager:
+  1. aur/zoom 7.2.1-1 (AUR, 746 votes)
+       Video Conferencing and Web Conferencing Server
+  2. aur/zoom-citrix-plugin 7.0.11-1 (AUR, 2 votes)
+       Zoom VDI Citrix plugin
+choose package [1-2]:
+```
+
+Ordering is deliberate: exact name match first, then prefix, then
+substring, then description match. Inside a rank an official repository
+beats the AUR, and inside the AUR the more popular package wins. At
+most ten candidates are shown.
+
+Unlike everything else in pig, this writes to the system and uses
+`sudo`. Official repositories go through `pacman -S`; AUR packages go
+through an AUR helper, `paru` first, then `yay`. With neither
+installed pig says so instead of failing obscurely.
+
+`-y` only skips the question when there is exactly one exact name
+match. Anything fuzzier still asks, because a wrong guess here changes
+the system rather than `~/.local`. Under `-y` with no exact match and
+no terminal, pig cancels instead of installing something arbitrary.
+
+`pig info`, `pig installed` and `pig remove` all understand these
+records; `pig remove` runs `pacman -Rns` (or the AUR helper's
+equivalent) with `sudo`. `pig upgrade` compares the recorded version
+against the one the package manager offers, using `vercmp` so epochs
+and package release numbers compare correctly.
+
+If a package exists only in a repository this machine has not enabled —
+`steam` lives in `multilib` — pig offers to switch it on, appends the
+stanza to `/etc/pacman.conf`, keeps a `.pig-bak` copy beside it and
+refreshes the databases:
+
+```text
+[pig] 'steam' is in the multilib repository, which is not enabled (enabled: core, extra)
+enable [multilib] and refresh the package databases? [y/N]:
+```
+
+Only `core`, `extra` and `multilib` are ever enabled this way; testing
+repositories and anything custom stay your business. With `-y` the
+question is skipped and shown instead.
+
+A `.deb` entry that pig cannot install here — no `dpkg` — is not an
+error either: it falls through to the same search, so a dictionary
+written for Debian still finds its packages on Arch.
+
+## fuzzy names
+
+A name is matched against packages in this order, each weaker than the
+last: exact, prefix, substring, a shared abbreviation of four or more
+characters (`chrome` reaches `chromium`), letters in order (`tgrm`
+reaches `telegram-desktop`), and finally one or two typos. Separators
+do not matter: `tor-browser` and `torbrowser` are the same name.
+
+If the literal search finds nothing, pig widens it: first a stem search
+— the name cut short, so `veskp` still reaches `vesktop` — then a
+comparison against every package in the enabled repositories, which is
+what catches real typos like `discor` for `discord`.
+
+Matches weaker than a shared abbreviation are never used to pick a
+package out of the 15000 available, and a query of one or two
+characters matches nothing but itself. The AUR has no bulk listing, so
+a typo in the name of an AUR-only package stays out of reach — type it
+closely. Nothing fuzzy is ever installed without being asked for.
 
 ## dictionaries
 
@@ -365,4 +442,4 @@ Copyright (c) 2026 @blvcksyxx
 
 ## changelog
 
-See `CHANGELOG.md`. Current release: `v1.2.0`.
+See `CHANGELOG.md`. Current release: `v1.4.0`.

@@ -1,5 +1,45 @@
 # changelog
 
+## v1.4.0
+
+- fuzzy package names: exact, prefix, substring, shared abbreviation,
+  letters in order and one or two typos; separators are ignored, so
+  `torbrowser` and `tor-browser` are the same name
+- widened search when the literal one finds nothing: a stem search
+  (`veskp` still reaches `vesktop`) and a comparison against every
+  package in the enabled repositories (`discor` reaches `discord`)
+- weak matches are never used to choose out of 15000 packages, and a
+  one or two character query matches nothing but itself
+- a `.deb` dictionary entry on a system without `dpkg` now falls
+  through to the package manager instead of failing on `dpkg-deb`
+- pig offers to enable a disabled repository itself: appends the
+  stanza to `/etc/pacman.conf`, keeps a `.pig-bak`, verifies the
+  result and refreshes the databases; only `core`, `extra` and
+  `multilib` are ever enabled this way
+- near-miss suggestions when a name is not found anywhere
+
+## v1.3.0
+
+- fallback to the system package manager: a name no dictionary knows
+  is looked up in `pacman` and the AUR, the matches are listed and the
+  user picks (Arch and other pacman systems)
+- ranking: exact name, then prefix, then substring, then description;
+  official repositories before the AUR, more popular AUR packages
+  first; at most 10 candidates shown
+- `-y` installs only on a single exact name match; anything fuzzier
+  still asks, and cancels instead of guessing without a terminal
+- AUR installs go through `paru`, then `yay`, with a clear error when
+  neither is installed; official repositories use `pacman -S`
+- `pig info`, `pig installed` and `pig remove` understand native
+  records; `pig remove` uses `pacman -Rns`
+- `pig upgrade` compares versions with `vercmp`, so epochs and package
+  release numbers order correctly
+- a package that exists only in a disabled repository (`steam` in
+  `multilib`) is reported instead of being silently replaced by AUR
+  lookalikes
+- `pig doctor` reports enabled repositories and the AUR helper
+- README no longer claims pig never manages system packages
+
 ## v1.2.0
 
 - new `pig-arch.txt` dictionary for distributions without `dpkg`

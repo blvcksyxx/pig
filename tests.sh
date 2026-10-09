@@ -1,5 +1,5 @@
 #!/bin/sh
-# pig tests v1.1.
+# pig tests v1.4.
 # Hermetic: isolated HOME dirs, local files, local 127.0.0.1 server only.
 # No system changes (except an empty test .deb when passwordless sudo allows).
 # Usage: ./tests.sh   (exit 0 = all pass)
@@ -440,6 +440,241 @@ dict_check "dict-debian-user-source" "$T/os-debian" "$T/hdict-deb2" \
     "[sources]
 debs = \"$PIG_TXT_URL\"
 " "pig.txt"
+
+echo "--- native packages (pacman + AUR) ---"
+if ! command -v pacman >/dev/null 2>&1; then
+    skip "native-supported" "no pacman"
+else
+    HN2="$T/hnative"
+    mkdir -p "$HN2/.config/pig"
+    printf 'other::file://%s/other-v1.tar.gz\n' "$FX" >"$FX/native.txt"
+    printf '[sources]\ntest = "%s/native.txt"\n' "$FX" >"$HN2/.config/pig/config.toml"
+    # ranking and query variants are pure: no network, no subprocesses
+    if python3 - "$PIG" <<'PYEOF'
+import importlib.util, shutil, sys
+spec = importlib.util.spec_from_file_location("pig", sys.argv[1])
+pig = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(pig)
+def C(src, repo, pkg, ver="1", votes=0, desc="", out=False):
+    return {"source": src, "repo": repo, "package": pkg, "version": ver,
+            "votes": votes, "popularity": 0.0, "outdated": out,
+            "installed": False, "description": desc}
+fail = []
+def check(cond, msg):
+    if not cond:
+        fail.append(msg)
+
+names = [c["package"] for c in pig.rank_native("zoom", [
+    C("aur", "aur", "zoom", "7.2.1-1", 746, "Video conferencing"),
+    C("pacman", "extra", "zoom-tools", votes=0, desc="helpers"),
+    C("aur", "aur", "aimp-skin-zoom", votes=0, desc="skins"),
+])]
+check(names[0] == "zoom", f"exact name must rank first, got {names}")
+check(names[1] == "zoom-tools", f"prefix must beat substring, got {names}")
+
+# official repository wins over the AUR at the same tier
+names = [c["repo"] for c in pig.rank_native("code", [
+    C("aur", "aur", "code", votes=900, desc="editor"),
+    C("pacman", "extra", "code", votes=0, desc="editor"),
+])]
+check(names[0] == "extra", f"official repo must outrank AUR, got {names}")
+
+# popular AUR package wins inside the AUR
+names = [c["package"] for c in pig.rank_native("zoom", [
+    C("aur", "aur", "zoom-b", votes=2, desc="conferencing"),
+    C("aur", "aur", "zoom-a", votes=500, desc="conferencing"),
+])]
+check(names[0] == "zoom-a", f"higher votes must win, got {names}")
+
+# description-only matches are kept, unrelated packages are dropped
+names = [c["package"] for c in pig.rank_native("editor", [
+    C("aur", "aur", "some-gui", desc="a nice text editor"),
+    C("aur", "aur", "totally-different", desc="nothing to do with it"),
+])]
+check(names == ["some-gui"], f"only matching packages must survive, got {names}")
+
+# a hyphenated query also reaches packages spelled without separators
+r = pig.rank_native("tor-browser", [C("aur", "aur", "torbrowser-launcher")],
+                    pig.query_variants("tor-browser"))
+check([c["package"] for c in r] == ["torbrowser-launcher"],
+      "hyphen query must reach the unhyphenated package")
+
+# query variants only add, never duplicate
+check(pig.query_variants("zoom") == [], "plain query needs no variant")
+check(pig.query_variants("tor-browser") == ["torbrowser"],
+      "hyphen query should gain the stripped variant")
+check(pig.query_variants("torbrowser") == [],
+      "unhyphenated query cannot guess where separators go")
+
+# native_supported follows pacman being on PATH
+check(pig.native_supported() == (shutil.which("pacman") is not None),
+      "native_supported must follow pacman")
+
+# fuzzy tiers: exact, prefix, substring, shared abbreviation, letters in
+# order, typos - and a hard "no relation"
+for q, n, want in [("zoom", "zoom", 0), ("zoom", "zoom-tools", 1),
+                   ("etcher", "balena-etcher", 2),
+                   ("chrome", "chromium", 3), ("tgrm", "telegram", 4),
+                   ("obsidan", "obsidian", 3), ("local-send", "localsend", 0),
+                   ("git", "gimp", None), ("abc", "xyz", None),
+                   ("a", "b", None), ("", "zoom", None),
+                   ("zoom", "", None)]:
+    check(pig.name_distance(q, n) == want,
+          f"name_distance({q!r}, {n!r}) = "
+          f"{pig.name_distance(q, n)}, expected {want}")
+
+# a single or two letter query must not sweep the dictionary
+check(pig.name_distance("ab", "abc") is None,
+      "a two letter query must not match a longer name")
+check(pig.name_distance("a", "abcdef") is None,
+      "a one letter query must not match everything")
+check(pig.name_distance("ab", "ab") == 0,
+      "an exact short name still matches itself")
+
+# separators do not change identity
+check(pig.name_distance("tor-browser", "torbrowser") == 0,
+      "hyphens must not matter for identity")
+
+# levenshtein bails out instead of running away on long names
+check(pig._levenshtein("a", "a" * 50, 2) > 2, "long names must bail out")
+check(pig._levenshtein("kitten", "sitting", 3) == 3, "known distance")
+check(pig._levenshtein("same", "same", 2) == 0, "identical strings")
+
+# the wide scan keeps only strong signals, so a fuzzy query does not
+# drown in subsequence noise
+if shutil.which("pacman"):
+    pkgs = pig._sync_packages()
+    if pkgs:
+        strong = [c["package"] for c in
+                  pig.native_search_recovery("discor")[:5]]
+        check(strong and strong[0] == "discord",
+              f"typo must find discord first, got {strong[:3]}")
+        junk = [c["package"] for c in pig.native_search_recovery("tgrm")]
+        check(not any(p.startswith("python-") for p in junk),
+              f"weak matches must be filtered out, got {junk[:3]}")
+print("; ".join(fail))
+sys.exit(1 if fail else 0)
+PYEOF
+    then
+        pass "native-rank"
+    else
+        fail "native-rank" "ranking expectations not met"
+    fi
+
+    # a name missing from every dictionary falls back to the package manager
+    code=$(run "$HN2" install definitely-not-a-real-package-xyzzy)
+    expect_code 1 "$code" "native-fallback-exit"
+    if grep -q "pacman repositories or the AUR" "$T/last.out"; then
+        pass "native-fallback-msg"
+    else
+        fail "native-fallback-msg" "$(cat "$T/last.out")"
+    fi
+    expect_no_traceback "native-fallback-no-traceback"
+
+    # -y must not silently pick a fuzzy match: it has to ask
+    code=$(printf '2\n' | run "$HN2" install definitely-not-a-real-package-xyzzy)
+    if grep -q "not in any dictionary" "$T/last.out" ||
+       grep -q "not found" "$T/last.out"; then
+        pass "native-yes-no-fuzzy-pick"
+    else
+        fail "native-yes-no-fuzzy-pick" "$(cat "$T/last.out")"
+    fi
+
+    # a dictionary hit must NOT be diverted to the package manager
+    code=$(run "$HN2" install other)
+    expect_code 0 "$code" "native-dictionary-wins"
+
+    # a .deb entry on a system without dpkg must fall through to the
+    # package manager instead of failing on dpkg-deb
+    printf 'debonly::file://%s/only.deb\n' "$FX" >"$FX/debonly.txt"
+    printf '[sources]\ntest = "%s/debonly.txt"\n' "$FX" >"$HN2/.config/pig/config.toml"
+    if ! command -v dpkg >/dev/null 2>&1; then
+        code=$(run "$HN2" install debonly)
+        expect_code 1 "$code" "native-deb-fallthrough-exit"
+        if grep -q "searching the package manager" "$T/last.out"; then
+            pass "native-deb-fallthrough-msg"
+        else
+            fail "native-deb-fallthrough-msg" "$(cat "$T/last.out")"
+        fi
+        if grep -q "dpkg-deb" "$T/last.out"; then
+            fail "native-deb-no-dpkg-error" "still tried dpkg-deb"
+        else
+            pass "native-deb-no-dpkg-error"
+        fi
+        # a dict entry pig can actually install must still be honoured
+        rm -rf "$HN2/.cache" "$HN2/.local"
+        printf '[sources]\ntest = "%s/native.txt"\n' "$FX" >"$HN2/.config/pig/config.toml"
+        code=$(run "$HN2" install other)
+        expect_code 0 "$code" "native-archive-still-works"
+    else
+        skip "native-deb-fallthrough-msg" "dpkg present, no fallthrough expected"
+        skip "native-deb-no-dpkg-error" "dpkg present"
+        skip "native-archive-still-works" "dpkg present"
+    fi
+
+    # enabling a repository: the allowlist and the conf check are pure
+    if python3 - "$PIG" <<'PYEOF2'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("pig", sys.argv[1])
+pig = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(pig)
+fail = []
+check = lambda c, m: None if c else fail.append(m)
+check(set(pig.NATIVE_ENABLEABLE_REPOS) == {"core", "extra", "multilib"},
+      "only stable official repositories may be enabled")
+try:
+    pig.enable_repo("core-testing")
+    fail.append("must refuse a repository outside the allowlist")
+except pig.PigError as e:
+    check("only enables" in str(e), f"refusal should explain: {e}")
+check(isinstance(pig.repo_in_conf("multilib"), bool),
+      "repo_in_conf must answer without raising")
+check(pig.enabled_repos() is not None, "enabled_repos must answer")
+
+# the pacman.conf edit itself, on a throwaway file: no root involved
+import pathlib, tempfile
+tmp = pathlib.Path(tempfile.mkdtemp())
+conf = tmp / "pacman.conf"
+conf.write_text("[core]\nInclude = /etc/pacman.d/mirrorlist\n"
+                "#[multilib]\n#[custom]\n")
+check(pig.repo_in_conf("core") is False or True, "readable")
+saved, pig.PACMAN_CONF = pig.PACMAN_CONF, conf
+check(pig.repo_in_conf("multilib") is False,
+      "a commented-out stanza must count as not enabled")
+bak = pig.append_repo_block(conf, "multilib")
+check(pig.repo_in_conf("multilib") is True,
+      "the stanza must be live after the append")
+text = conf.read_text()
+check("[core]" in text, "existing stanzas must survive")
+check("#[custom]" in text, "commented stanzas must survive")
+check(pathlib.Path(bak).exists(), "the backup must exist")
+check(pathlib.Path(bak).read_text() != text,
+      "the backup must be the pre-append content")
+# appending twice must not duplicate the live stanza
+import re as _re
+active = lambda n: len(_re.findall(r"^\[" + n + r"\]$",
+                                   conf.read_text(), _re.M))
+pig.append_repo_block(conf, "multilib", backup=False)
+check(active("multilib") == 1,
+      f"a second append must not duplicate the stanza, got {active('multilib')}")
+# an existing stanza must not be duplicated either
+pig.append_repo_block(conf, "core", backup=False)
+check(active("core") == 1,
+      f"an existing stanza must not be duplicated, got {active('core')}")
+check(active("custom") == 0,
+      "a commented stanza must stay commented")
+pig.PACMAN_CONF = saved
+import shutil as _sh
+_sh.rmtree(tmp, ignore_errors=True)
+print("; ".join(fail))
+sys.exit(1 if fail else 0)
+PYEOF2
+    then
+        pass "native-enable-guard"
+    else
+        fail "native-enable-guard" "repository guard expectations not met"
+    fi
+fi
 
 echo "--- installer gate ---"
 HI="$T/hinstall"

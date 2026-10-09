@@ -31,10 +31,36 @@ Debian/Ubuntu derivatives not listed here are usually picked up
 automatically through `ID_LIKE=debian` / `ID_LIKE=ubuntu`
 in `/etc/os-release`.
 
+## full support
+
+`.deb`, `.tar.gz`, `.tar.xz` and `.sh`, no limitations.
+
+- Debian
+- Ubuntu
+- Linux Mint
+- Kali Linux
+- Pop!_OS
+- Zorin OS
+- MX Linux
+- Raspberry Pi OS (Raspbian)
+- elementary OS
+- Parrot OS
+- PureOS
+- Devuan
+- Deepin
+
+Debian/Ubuntu derivatives not listed here are usually picked up
+automatically through `ID_LIKE=debian` / `ID_LIKE=ubuntu`
+in `/etc/os-release`.
+
 ## partial support
 
 `.tar.gz`, `.tar.xz` and `.sh` work. `.deb` packages need `dpkg`,
 which these distributions do not ship.
+
+On these, the `pacman` ones additionally fall back to the system
+package manager and the AUR for names no dictionary knows (see README,
+"system packages"). The rest do not.
 
 - Arch Linux
 - Manjaro
