@@ -664,6 +664,16 @@ check(active("core") == 1,
 check(active("custom") == 0,
       "a commented stanza must stay commented")
 
+# every package manager invocation must silence the progress bar,
+# otherwise pacman redraws one line dozens of times per package
+argv_pacman = pig._native_argv({"source": "pacman", "package": "obsidian"})
+argv_aur = pig._native_argv({"source": "aur", "package": "zoom"})
+check("--noprogressbar" in argv_pacman, "pacman needs --noprogressbar")
+check("--noprogressbar" in argv_aur, "the AUR helper needs --noprogressbar")
+check(argv_pacman[0] == "pacman" and argv_pacman[-1] == "obsidian",
+      f"pacman argv changed shape: {argv_pacman}")
+check(argv_aur[-1] == "zoom", f"aur argv changed shape: {argv_aur}")
+
 # the pacman lock: live vs abandoned. No root involved, the removal is
 # stubbed out, so this is safe to exercise on any machine.
 lock = tmp / "db.lck"

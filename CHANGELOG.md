@@ -1,5 +1,13 @@
 # changelog
 
+## v1.4.3
+
+- pacman and the AUR helper are called with `--noprogressbar`: when the
+  terminal cannot move the cursor, pacman prints its whole progress line
+  again for every update, so installing one package spammed the terminal
+  with dozens of copies of `(1/1) installing <name>`
+- the flag is added to removals as well
+
 ## v1.4.2
 
 - an abandoned pacman lock no longer blocks every later install: pig

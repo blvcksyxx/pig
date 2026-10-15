@@ -34,7 +34,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-VERSION = "1.4.2"
+VERSION = "1.4.3"
 OFFICIAL_DICT_URL = "https://github.com/blvcksyxx/pig/raw/refs/heads/main/pig.txt"
 OFFICIAL_ARCH_DICT_URL = "https://github.com/blvcksyxx/pig/raw/refs/heads/main/pig-arch.txt"
 OFFICIAL_PIG_URL = "https://github.com/blvcksyxx/pig/raw/refs/heads/main/pig.py"
@@ -1802,12 +1802,20 @@ def choose_native(name: str, cands: list) -> dict:
 
 
 def _native_argv(c: dict) -> list:
-    """Install command for a candidate. AUR goes through the helper."""
+    """Install command for a candidate. AUR goes through the helper.
+
+    --noprogressbar is deliberate: pacman redraws its progress line
+    with carriage returns, and when the terminal cannot move the cursor
+    it assumes a bar would be unreadable and prints the whole line
+    again for every update instead. One package then spits out
+    "(1/1) installing foo" dozens of times.
+    """
     pkg = c["package"]
     if c["source"] == "pacman":
-        return ["pacman", "-S", "--needed", "--noconfirm", pkg]
+        return ["pacman", "-S", "--needed", "--noconfirm", "--noprogressbar",
+                pkg]
     return [native_helper() or "paru", "-S", "--needed", "--noconfirm",
-            "--sudoloop", pkg]
+            "--noprogressbar", "--sudoloop", pkg]
 
 
 def native_install(c: dict, yes: bool = False) -> dict:
@@ -1891,10 +1899,11 @@ def native_remove(rec: dict) -> None:
     if kind == "aur" and native_helper():
         h = native_helper()
         info(f"removing {pkg} via {h}...")
-        r = run_cmd([h, "-Rns", "--noconfirm", pkg])
+        r = run_cmd([h, "-Rns", "--noconfirm", "--noprogressbar", pkg])
     else:
         info(f"removing {pkg} via pacman...")
-        r = run_cmd(["pacman", "-Rns", "--noconfirm", pkg], need_root=True)
+        r = run_cmd(["pacman", "-Rns", "--noconfirm", "--noprogressbar", pkg],
+                    need_root=True)
     if r.returncode != 0:
         raise PigError(f"failed to remove '{pkg}' (exit {r.returncode})")
 
